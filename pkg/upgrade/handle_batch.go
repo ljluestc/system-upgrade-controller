@@ -98,6 +98,17 @@ func (ctl *Controller) handleJobs(ctx context.Context) error {
 			if plan, err = plans.UpdateStatus(plan); err != nil {
 				return obj, err
 			}
+			// mark the node as schedulable so that a failed cordon or drain does not leave
+			// the node unschedulable until the job is retried.
+			// Ref: https://github.com/rancher/system-upgrade-controller/issues/200
+			if node.Spec.Unschedulable && (plan.Spec.Cordon || plan.Spec.Drain != nil) {
+				node = node.DeepCopy()
+				node.Spec.Unschedulable = false
+				if _, err = nodes.Update(node); err != nil {
+					return obj, err
+				}
+				ctl.recorder.Eventf(plan, corev1.EventTypeNormal, "NodeUncordoned", "Uncordoned Node %s after Job %s/%s failed", nodeName, obj.Namespace, obj.Name)
+			}
 			return obj, enqueueOrDelete(jobs, obj, failedTime)
 		}
 		// if the job has completed tag the node then enqueue-or-delete depending on the TTL window
