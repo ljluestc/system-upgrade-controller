@@ -83,16 +83,11 @@ func (ctl *Controller) handleJobs(ctx context.Context) error {
 			return obj, err
 		}
 		// if the job has failed enqueue-or-delete it depending on the TTL window
-		if upgradejob.ConditionFailed.IsTrue(obj) {
+		if message, failed := upgradejob.FailedMessage(obj); failed {
 			failedTime := upgradejob.ConditionFailed.GetLastTransitionTime(obj)
 			if failedTime.IsZero() {
 				return obj, fmt.Errorf("condition %q missing field %q", upgradejob.ConditionFailed, "LastTransitionTime")
 			}
-			message := fmt.Sprintf("Job %s/%s failed on Node %s: %s: %s",
-				obj.Namespace, obj.Name, nodeName,
-				upgradejob.ConditionFailed.GetReason(obj),
-				upgradejob.ConditionFailed.GetMessage(obj),
-			)
 			ctl.recorder.Eventf(plan, corev1.EventTypeWarning, "JobFailed", "%s", message)
 			upgradeapiv1.PlanComplete.SetError(plan, "JobFailed", errors.New(message))
 			if plan, err = plans.UpdateStatus(plan); err != nil {

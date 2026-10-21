@@ -1,6 +1,7 @@
 package job
 
 import (
+	"fmt"
 	"os"
 	"slices"
 	"strconv"
@@ -132,6 +133,18 @@ var (
 	ConditionComplete = condition.Cond(batchv1.JobComplete)
 	ConditionFailed   = condition.Cond(batchv1.JobFailed)
 )
+
+// FailedMessage returns a message describing why the Job failed, and whether the Job has failed.
+func FailedMessage(job *batchv1.Job) (string, bool) {
+	if !ConditionFailed.IsTrue(job) {
+		return "", false
+	}
+	return fmt.Sprintf("Job %s/%s failed on Node %s: %s: %s",
+		job.Namespace, job.Name, job.Labels[upgradeapi.LabelNode],
+		ConditionFailed.GetReason(job),
+		ConditionFailed.GetMessage(job),
+	), true
+}
 
 func New(plan *upgradeapiv1.Plan, node *corev1.Node, controllerName string) *batchv1.Job {
 	exclusiveString := strconv.FormatBool(plan.Spec.Exclusive)

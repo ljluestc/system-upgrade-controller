@@ -2,19 +2,23 @@ package upgrade
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
 
+	upgradeapi "github.com/rancher/system-upgrade-controller/pkg/apis/upgrade.cattle.io"
 	upgradeapiv1 "github.com/rancher/system-upgrade-controller/pkg/apis/upgrade.cattle.io/v1"
 	upgradectlv1 "github.com/rancher/system-upgrade-controller/pkg/generated/controllers/upgrade.cattle.io/v1"
 	upgradejob "github.com/rancher/system-upgrade-controller/pkg/upgrade/job"
 	upgradenode "github.com/rancher/system-upgrade-controller/pkg/upgrade/node"
 	upgradeplan "github.com/rancher/system-upgrade-controller/pkg/upgrade/plan"
+	batchctlv1 "github.com/rancher/wrangler/v3/pkg/generated/controllers/batch/v1"
 	"github.com/rancher/wrangler/v3/pkg/generic"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -175,6 +179,22 @@ func (ctl *Controller) handlePlans(ctx context.Context) error {
 					complete.Message(obj, "")
 					complete.Reason(obj, "SyncJob")
 				}
+
+				// Reflect failed Jobs for nodes that are still being applied in the Complete condition,
+				// so that syncing Jobs for other nodes does not hide the failure.
+				// Ref: https://github.com/rancher/system-upgrade-controller/issues/221
+				failures, err := failedJobMessages(jobs.Cache(), obj, concurrentNodes, ctl.Name)
+				if err != nil {
+					return objects, status, err
+				}
+				if len(failures) > 0 {
+					complete.SetError(obj, "JobFailed", errors.New(strings.Join(failures, "; ")))
+				} else if complete.GetReason(obj) == "JobFailed" {
+					// failed Jobs have been deleted and are being retried
+					complete.False(obj)
+					complete.Message(obj, "")
+					complete.Reason(obj, "SyncJob")
+				}
 			} else {
 				// set PlanComplete to true when no nodes have been selected,
 				// and emit an event if the plan just completed
@@ -196,4 +216,28 @@ func (ctl *Controller) handlePlans(ctx context.Context) error {
 	)
 
 	return nil
+}
+
+// failedJobMessages returns messages for the failed Jobs applying the latest hash of the Plan to the given nodes.
+func failedJobMessages(jobCache batchctlv1.JobCache, plan *upgradeapiv1.Plan, nodes []*corev1.Node, controllerName string) ([]string, error) {
+	jobSelector := labels.SelectorFromSet(labels.Set{
+		upgradeapi.LabelController:          controllerName,
+		upgradeapi.LabelPlan:                plan.Name,
+		upgradeapi.LabelPlanName(plan.Name): plan.Status.LatestHash,
+	})
+	jobList, err := jobCache.List(plan.Namespace, jobSelector)
+	if err != nil {
+		return nil, err
+	}
+	var failures []string
+	for _, job := range jobList {
+		if !slices.ContainsFunc(nodes, func(node *corev1.Node) bool { return node.Name == job.Labels[upgradeapi.LabelNode] }) {
+			continue
+		}
+		if message, failed := upgradejob.FailedMessage(job); failed {
+			failures = append(failures, message)
+		}
+	}
+	slices.Sort(failures)
+	return failures, nil
 }
